@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Lyrics">
+<meta name="theme-color" content="#07130C">
+<title>Lyrics Green</title>
+<style>
+:root{--bg:#07130C;--brand:#1DB954;--accent:#4DFF8F;--dim:#4C8566;--faint:#2F5A41;--text:#E8F5EC}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,"Sukhumvit Set",system-ui,sans-serif}
+#app{height:100%;display:flex;flex-direction:column;padding:env(safe-area-inset-top) 18px env(safe-area-inset-bottom)}
+header{display:flex;align-items:center;gap:12px;padding:14px 0}
+#cover{width:48px;height:48px;border-radius:8px;background:var(--brand);object-fit:cover}
+#meta{flex:1;min-width:0}
+#title{font-weight:600;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#artist{font-size:13px;color:var(--dim)}
+#lyrics{flex:1;overflow-y:auto;scrollbar-width:none;padding:40vh 0;-webkit-overflow-scrolling:touch}
+#lyrics::-webkit-scrollbar{display:none}
+.l{margin:0 0 18px;color:var(--dim);font-size:calc(22px*var(--scale,1));line-height:1.3;transition:all .25s}
+.l.on{color:var(--accent);font-weight:700;font-size:calc(28px*var(--scale,1))}
+#status{color:var(--dim);text-align:center;padding-top:30vh}
+footer{padding:10px 0 14px;display:grid;gap:6px;font-size:12px;color:var(--dim)}
+footer label{display:flex;align-items:center;gap:10px}
+footer input[type=range]{flex:1;accent-color:var(--brand)}
+#setup{padding:32px 4px;line-height:1.7}
+#setup input{width:100%;padding:12px;border-radius:8px;border:1px solid var(--faint);background:#0c2016;color:var(--text);font-size:16px}
+button{background:var(--brand);color:#07130C;border:0;border-radius:10px;padding:12px 18px;font-size:16px;font-weight:600;margin-top:12px}
+code{background:#0c2016;padding:2px 6px;border-radius:4px;word-break:break-all;color:var(--accent)}
+.hide{display:none!important}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="setup" class="hide"></div>
+  <header id="head" class="hide">
+    <img id="cover" alt="">
+    <div id="meta"><div id="title">Lyrics</div><div id="artist"></div></div>
+  </header>
+  <div id="lyrics" class="hide"><div id="status"></div><div id="lines"></div></div>
+  <footer id="foot" class="hide">
+    <label>จังหวะ <span id="offv">+0.0</span> วิ <input id="off" type="range" min="-5" max="5" step="0.1" value="0"></label>
+    <label>ขนาดตัวอักษร <input id="size" type="range" min="0.8" max="1.6" step="0.05" value="1"></label>
+  </footer>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const REDIRECT = location.origin + location.pathname;
+const SCOPE = "user-read-currently-playing user-read-playback-state";
+const store = {
+  get: k => { try { return localStorage.getItem(k) } catch { return null } },
+  set: (k, v) => { try { localStorage.setItem(k, v) } catch {} },
+  del: k => { try { localStorage.removeItem(k) } catch {} }
+};
+let offset = 0, lines = [], cur = -1, trackId = null;
+let basePos = 0, baseAt = 0, playing = false;
+
+const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+async function login() {
+  const verifier = b64url(crypto.getRandomValues(new Uint8Array(48)));
+  const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
+  store.set("verifier", verifier);
+  const p = new URLSearchParams({ response_type:"code", client_id:store.get("cid"), scope:SCOPE,
+    redirect_uri:REDIRECT, code_challenge_method:"S256", code_challenge:challenge });
+  location.href = "https://accounts.spotify.com/authorize?" + p;
+}
+async function tokenRequest(params) {
+  const r = await fetch("https://accounts.spotify.com/api/token", {
+    method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"},
+    body:new URLSearchParams({ client_id:store.get("cid"), ...params })
+  });
+  if (!r.ok) throw new Error("token");
+  const t = await r.json();
+  store.set("access", t.access_token);
+  if (t.refresh_token) store.set("refresh", t.refresh_token);
+  store.set("exp", String(Date.now() + t.expires_in * 1000 - 60000));
+}
+async function token() {
+  if (Date.now() > Number(store.get("exp") || 0)) {
+    await tokenRequest({ grant_type:"refresh_token", refresh_token:store.get("refresh") });
+  }
+  return store.get("access");
+}
+
+function showSetup() {
+  $("setup").classList.remove("hide");
+  $("setup").innerHTML = `<h2 style="color:var(--accent)">ตั้งค่าครั้งแรก</h2>
+  <p>1) เข้า developer.spotify.com/dashboard แล้วสร้าง App ใหม่<br>
+  2) ใส่ Redirect URI เป็น <code>${REDIRECT}</code><br>
+  3) เอา Client ID มาวางข้างล่าง</p>
+  <input id="cid" placeholder="Client ID" value="${store.get("cid") || ""}">
+  <button id="go">เชื่อมต่อ Spotify</button>`;
+  $("go").onclick = () => { const v = $("cid").value.trim(); if (!v) return; store.set("cid", v); login(); };
+}
+
+async function boot() {
+  const code = new URLSearchParams(location.search).get("code");
+  if (code) {
+    try { await tokenRequest({ grant_type:"authorization_code", code, redirect_uri:REDIRECT, code_verifier:store.get("verifier") }); }
+    catch { store.del("refresh"); }
+    history.replaceState({}, "", REDIRECT);
+  }
+  if (!store.get("cid") || !store.get("refresh")) return showSetup();
+  ["head","lyrics","foot"].forEach(i => $(i).classList.remove("hide"));
+  $("status").textContent = "เปิดเพลงใน Spotify แล้วเนื้อเพลงจะขึ้นที่นี่";
+  poll(); setInterval(poll, 4000); requestAnimationFrame(tick);
+  try { if (navigator.wakeLock) navigator.wakeLock.request("screen"); } catch {}
+  document.addEventListener("visibilitychange", () => { try { if (!document.hidden && navigator.wakeLock) navigator.wakeLock.request("screen"); } catch {} });
+}
+
+async function poll() {
+  try {
+    const r = await fetch("https://api.spotify.com/v1/me/player/currently-playing", { headers:{ Authorization:"Bearer " + await token() } });
+    if (r.status === 204) { playing = false; return; }
+    if (!r.ok) return;
+    const d = await r.json();
+    if (!d.item) return;
+    basePos = d.progress_ms / 1000; baseAt = performance.now(); playing = d.is_playing;
+    if (d.item.id !== trackId) { trackId = d.item.id; loadTrack(d.item); }
+  } catch (e) { if (String(e).includes("token")) { store.del("refresh"); showSetup(); } }
+}
+
+async function loadTrack(t) {
+  const artist = t.artists.map(a => a.name).join(", ");
+  $("title").textContent = t.name; $("artist").textContent = artist;
+  $("cover").src = (t.album.images[2] || t.album.images[0] || {}).url || "";
+  $("lines").innerHTML = ""; lines = []; cur = -1;
+  $("status").textContent = "กำลังโหลดเนื้อเพลง...";
+  const q = new URLSearchParams({ track_name:t.name, artist_name:t.artists[0].name, album_name:t.album.name, duration:Math.round(t.duration_ms/1000) });
+  let data = null;
+  try {
+    let r = await fetch("https://lrclib.net/api/get?" + q);
+    if (r.ok) data = await r.json();
+    else {
+      r = await fetch("https://lrclib.net/api/search?" + new URLSearchParams({ q: t.name + " " + t.artists[0].name }));
+      const arr = r.ok ? await r.json() : [];
+      data = arr.find(x => x.syncedLyrics) || arr[0] || null;
+    }
+  } catch {}
+  if (t.id !== trackId) return;
+  if (data && data.syncedLyrics) lines = parseLRC(data.syncedLyrics);
+  else if (data && data.plainLyrics) lines = data.plainLyrics.split("\n").map(s => ({ t:-1, s }));
+  if (!lines.length) { $("status").textContent = "ไม่พบเนื้อเพลง"; return; }
+  $("status").textContent = "";
+  lines.forEach(l => { const p = document.createElement("p"); p.className = "l"; p.textContent = l.s || "♪"; $("lines").appendChild(p); });
+}
+
+function parseLRC(raw) {
+  const out = [];
+  for (const row of raw.split("\n")) {
+    const m = row.match(/^\[(\d+):(\d+)(?:\.(\d+))?\]\s*(.*)$/);
+    if (!m) continue;
+    const frac = m[3] ? Number(m[3]) / Math.pow(10, m[3].length) : 0;
+    out.push({ t: Number(m[1]) * 60 + Number(m[2]) + frac, s: m[4] });
+  }
+  return out.sort((a, b) => a.t - b.t);
+}
+
+function tick() {
+  if (lines.length && lines[0].t >= 0) {
+    const pos = basePos + (playing ? (performance.now() - baseAt) / 1000 : 0) + offset;
+    let i = -1;
+    for (let k = 0; k < lines.length; k++) { if (lines[k].t <= pos) i = k; else break; }
+    if (i !== cur) {
+      const els = $("lines").children;
+      if (els[cur]) els[cur].classList.remove("on");
+      cur = i;
+      if (els[cur]) { els[cur].classList.add("on"); els[cur].scrollIntoView({ behavior:"smooth", block:"center" }); }
+    }
+  }
+  requestAnimationFrame(tick);
+}
+
+$("off").oninput = e => { offset = Number(e.target.value); $("offv").textContent = (offset >= 0 ? "+" : "") + offset.toFixed(1); };
+$("size").oninput = e => document.documentElement.style.setProperty("--scale", e.target.value);
+boot();
+</script>
+</body>
+</html>
